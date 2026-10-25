@@ -1,0 +1,140 @@
+# name: test/sql/local/catalog_test_config_setup/catalog_agnostic/reads/scan_order_null_files.test
+# group: [reads]
+
+include test/sql/init_requires
+
+require-env CATALOG_TEST_CONFIG_SETUP
+
+statement ok
+DROP TABLE IF EXISTS my_datalake.default.scan_order_null_files;
+
+statement ok
+CREATE TABLE my_datalake.default.scan_order_null_files (day INTEGER, v BIGINT) PARTITIONED BY (day);
+
+# 30 files of 100 rows for days 0..29, and one file of 10 rows whose day is NULL
+statement ok
+INSERT INTO my_datalake.default.scan_order_null_files
+SELECT CASE WHEN i >= 3000 THEN NULL ELSE i % 30 END, i FROM range(3010) t(i);
+
+query I
+SELECT day FROM my_datalake.default.scan_order_null_files ORDER BY day LIMIT 3;
+----
+0
+0
+0
+
+query I
+SELECT day FROM my_datalake.default.scan_order_null_files ORDER BY day DESC LIMIT 3;
+----
+29
+29
+29
+
+query I
+SELECT day FROM my_datalake.default.scan_order_null_files ORDER BY day NULLS FIRST LIMIT 3;
+----
+NULL
+NULL
+NULL
+
+query I
+SELECT day FROM my_datalake.default.scan_order_null_files ORDER BY day DESC NULLS FIRST LIMIT 3;
+----
+NULL
+NULL
+NULL
+
+# The limit reaches past the non-NULL rows, so the NULL file must still be scanned
+query II
+SELECT count(*), count(day) FROM (SELECT day FROM my_datalake.default.scan_order_null_files ORDER BY day LIMIT 3005);
+----
+3005	3000
+
+query II
+SELECT count(*), count(day) FROM (SELECT day FROM my_datalake.default.scan_order_null_files ORDER BY day NULLS FIRST LIMIT 15);
+----
+15	5
+
+# The NULL file no longer disables pruning: only the files a limit can reach are read
+query II
+EXPLAIN ANALYZE SELECT day FROM my_datalake.default.scan_order_null_files ORDER BY day LIMIT 3;
+----
+analyzed_plan	<REGEX>:.*Total Files Read: 1\s+.*
+
+query II
+EXPLAIN ANALYZE SELECT day FROM my_datalake.default.scan_order_null_files ORDER BY day DESC LIMIT 3;
+----
+analyzed_plan	<REGEX>:.*Total Files Read: 1\s+.*
+
+# With NULLS FIRST the NULL file is read first, followed by the first ordered file
+query II
+EXPLAIN ANALYZE SELECT day FROM my_datalake.default.scan_order_null_files ORDER BY day NULLS FIRST LIMIT 3;
+----
+analyzed_plan	<REGEX>:.*Total Files Read: 2\s+.*
+
+# A file mixing values and NULLs also used to disable pruning
+statement ok
+DROP TABLE IF EXISTS my_datalake.default.scan_order_mixed_null_file;
+
+statement ok
+CREATE TABLE my_datalake.default.scan_order_mixed_null_file (id INTEGER);
+
+statement ok
+INSERT INTO my_datalake.default.scan_order_mixed_null_file SELECT i FROM range(1, 11) t(i);
+
+statement ok
+INSERT INTO my_datalake.default.scan_order_mixed_null_file SELECT CASE WHEN i % 2 = 0 THEN NULL ELSE i END FROM range(11, 21) t(i);
+
+query I
+SELECT id FROM my_datalake.default.scan_order_mixed_null_file ORDER BY id LIMIT 3;
+----
+1
+2
+3
+
+query II
+EXPLAIN ANALYZE SELECT id FROM my_datalake.default.scan_order_mixed_null_file ORDER BY id LIMIT 3;
+----
+analyzed_plan	<REGEX>:.*Total Files Read: 1\s+.*
+
+query I
+SELECT id FROM my_datalake.default.scan_order_mixed_null_file ORDER BY id DESC LIMIT 3;
+----
+19
+17
+15
+
+query I
+SELECT count(*) FROM (SELECT id FROM my_datalake.default.scan_order_mixed_null_file ORDER BY id NULLS FIRST LIMIT 7) WHERE id IS NULL;
+----
+5
+
+# Ground truth with the scan order optimization disabled
+statement ok
+CREATE TEMP TABLE optimized AS
+SELECT 'asc' q, list(day ORDER BY day NULLS LAST) l FROM (SELECT day FROM my_datalake.default.scan_order_null_files ORDER BY day LIMIT 3005)
+UNION ALL SELECT 'nulls_first', list(day ORDER BY day NULLS FIRST) FROM (SELECT day FROM my_datalake.default.scan_order_null_files ORDER BY day NULLS FIRST LIMIT 150)
+UNION ALL SELECT 'desc', list(day ORDER BY day DESC NULLS LAST) FROM (SELECT day FROM my_datalake.default.scan_order_null_files ORDER BY day DESC LIMIT 150);
+
+statement ok
+PRAGMA disabled_optimizers='row_group_pruner';
+
+statement ok
+CREATE TEMP TABLE oracle AS
+SELECT 'asc' q, list(day ORDER BY day NULLS LAST) l FROM (SELECT day FROM my_datalake.default.scan_order_null_files ORDER BY day LIMIT 3005)
+UNION ALL SELECT 'nulls_first', list(day ORDER BY day NULLS FIRST) FROM (SELECT day FROM my_datalake.default.scan_order_null_files ORDER BY day NULLS FIRST LIMIT 150)
+UNION ALL SELECT 'desc', list(day ORDER BY day DESC NULLS LAST) FROM (SELECT day FROM my_datalake.default.scan_order_null_files ORDER BY day DESC LIMIT 150);
+
+statement ok
+PRAGMA disabled_optimizers='';
+
+query I
+SELECT count(*) FROM optimized JOIN oracle USING (q) WHERE optimized.l IS DISTINCT FROM oracle.l;
+----
+0
+
+statement ok
+DROP TABLE my_datalake.default.scan_order_null_files;
+
+statement ok
+DROP TABLE my_datalake.default.scan_order_mixed_null_file;
