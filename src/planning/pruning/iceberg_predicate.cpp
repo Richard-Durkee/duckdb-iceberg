@@ -17,6 +17,7 @@
 #include "duckdb/planner/logical_operator_visitor.hpp"
 #include "duckdb/execution/expression_executor.hpp"
 #include "duckdb/storage/statistics/geometry_stats.hpp"
+#include "duckdb/storage/statistics/numeric_stats.hpp"
 
 namespace duckdb {
 
@@ -154,6 +155,56 @@ static bool MatchBoundsIsNullFilter(const IcebergPredicateStats &stats) {
 
 static bool MatchBoundsIsNotNullFilter(const IcebergPredicateStats &stats) {
 	return stats.has_not_null == true;
+}
+
+static bool SupportsNumericStatsFallback(const LogicalType &type) {
+	//! FLOAT/DOUBLE are excluded: Iceberg bounds don't account for NaN
+	switch (type.id()) {
+	case LogicalTypeId::TINYINT:
+	case LogicalTypeId::SMALLINT:
+	case LogicalTypeId::INTEGER:
+	case LogicalTypeId::BIGINT:
+	case LogicalTypeId::HUGEINT:
+	case LogicalTypeId::UTINYINT:
+	case LogicalTypeId::USMALLINT:
+	case LogicalTypeId::UINTEGER:
+	case LogicalTypeId::UBIGINT:
+	case LogicalTypeId::UHUGEINT:
+	case LogicalTypeId::DECIMAL:
+	case LogicalTypeId::DATE:
+	case LogicalTypeId::TIME:
+	case LogicalTypeId::TIMESTAMP:
+	case LogicalTypeId::TIMESTAMP_TZ:
+		return true;
+	default:
+		return false;
+	}
+}
+
+//! Let DuckDB check a filter expression we don't evaluate ourselves (e.g. the probabilistic join filters pushed by
+//! hash joins) against the file's bounds, by converting them into numeric statistics
+static bool MatchBoundsWithNumericStats(ClientContext &context, const Expression &expr,
+                                        const IcebergPredicateStats &stats, const IcebergTransform &transform) {
+	if (transform.Type() != IcebergTransformType::IDENTITY || !stats.lower_bound || !stats.upper_bound) {
+		return true;
+	}
+	auto &lower = *stats.lower_bound;
+	auto &upper = *stats.upper_bound;
+	if (lower.IsNull() || upper.IsNull() || lower.type() != upper.type() ||
+	    !SupportsNumericStatsFallback(lower.type())) {
+		return true;
+	}
+	auto numeric_stats = BaseStatistics::CreateEmpty(lower.type());
+	NumericStats::SetMin(numeric_stats, lower);
+	NumericStats::SetMax(numeric_stats, upper);
+	if (stats.has_null) {
+		numeric_stats.SetHasNull();
+	}
+	if (stats.has_not_null) {
+		numeric_stats.SetHasNoNull();
+	}
+	auto result = ExpressionFilter::CheckExpressionStatistics(context, expr, numeric_stats);
+	return result != FilterPropagateResult::FILTER_ALWAYS_FALSE;
 }
 
 //! variant_comparator keys start with a byte that ranks the value's type (all numbers share one rank)
@@ -397,7 +448,7 @@ static bool MatchBoundsExpression(ClientContext &context, const unique_ptr<Expre
 			//! child filter wasn't populated (yet?) for some reason, just be conservative
 			return true;
 		}
-		return true;
+		return MatchBoundsWithNumericStats(context, expr, stats, transform);
 	}
 	default:
 		//! Conservative approach: we don't know what this is, just say it doesn't filter anything

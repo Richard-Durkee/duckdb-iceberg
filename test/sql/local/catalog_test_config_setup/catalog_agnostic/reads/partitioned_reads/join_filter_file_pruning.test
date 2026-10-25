@@ -1,0 +1,33 @@
+# name: test/sql/local/catalog_test_config_setup/catalog_agnostic/reads/partitioned_reads/join_filter_file_pruning.test
+# group: [partitioned_reads]
+
+include test/sql/init_requires
+
+require-env CATALOG_TEST_CONFIG_SETUP
+
+statement ok
+DROP TABLE IF EXISTS my_datalake.default.join_filter_file_pruning;
+
+statement ok
+CREATE TABLE my_datalake.default.join_filter_file_pruning (k BIGINT, v BIGINT) PARTITIONED BY (k);
+
+# One data file per partition value
+statement ok
+INSERT INTO my_datalake.default.join_filter_file_pruning SELECT i % 300, i FROM range(3000) t(i);
+
+# Keys spread over the whole partition range, so a min/max filter can't prune but the join's PRF filter can
+statement ok
+CREATE TEMP TABLE join_keys AS SELECT i * 5 AS k FROM range(60) t(i);
+
+query II
+SELECT count(*), sum(v) FROM my_datalake.default.join_filter_file_pruning JOIN join_keys USING (k);
+----
+600	898500
+
+query II
+EXPLAIN ANALYZE SELECT count(*), sum(v) FROM my_datalake.default.join_filter_file_pruning JOIN join_keys USING (k);
+----
+analyzed_plan	<REGEX>:.*Total Files Read: 60\s+.*
+
+statement ok
+DROP TABLE my_datalake.default.join_filter_file_pruning;
