@@ -9,6 +9,7 @@
 
 namespace duckdb {
 class IcebergCatalog;
+class IcebergTablePrefetch;
 class IcebergSchemaEntry;
 class IcebergTableSchemaVersion;
 
@@ -150,6 +151,8 @@ public:
 	vector<unique_ptr<ViewCatalogEntry>> retired_views;
 	//! Catalog view listings, keyed by schema name, with transaction-local lifetime.
 	unordered_map<string, unordered_set<string>> listed_views;
+	//! LoadTable requests scheduled ahead of binding for the tables the current query references
+	unique_ptr<IcebergTablePrefetch> table_prefetch;
 	//! views that have been deleted in this transaction, to be deleted on commit.
 	struct DeletedViewInfo {
 		vector<string> namespace_items;

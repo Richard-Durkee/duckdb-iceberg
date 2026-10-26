@@ -23,6 +23,7 @@
 #include "catalog/rest/transaction/iceberg_transaction.hpp"
 #include "catalog/rest/api/iceberg_retry.hpp"
 #include "catalog/rest/iceberg_catalog.hpp"
+#include "catalog/rest/iceberg_table_prefetch.hpp"
 #include "catalog/rest/storage/iceberg_authorization.hpp"
 #include "catalog/rest/catalog_entry/table/iceberg_table.hpp"
 #include "catalog/rest/api/iceberg_add_snapshot.hpp"

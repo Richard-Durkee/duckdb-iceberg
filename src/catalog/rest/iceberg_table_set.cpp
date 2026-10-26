@@ -21,6 +21,7 @@
 #include "common/iceberg_constants.hpp"
 #include "catalog/rest/iceberg_catalog.hpp"
 #include "catalog/rest/iceberg_request_executor.hpp"
+#include "catalog/rest/iceberg_table_prefetch.hpp"
 #include "catalog/rest/catalog_entry/table/iceberg_table_schema_version.hpp"
 #include "catalog/rest/transaction/iceberg_transaction.hpp"
 #include "catalog/rest/storage/authorization/sigv4.hpp"
@@ -41,6 +42,14 @@ bool IcebergTableSet::FillEntry(ClientContext &context, IcebergTable &table) {
 		return true;
 	}
 	auto &ic_catalog = catalog.Cast<IcebergCatalog>();
+	auto &transaction = IcebergTransaction::Get(context, catalog);
+	if (transaction.table_prefetch) {
+		IcebergLoadTableResult prefetched;
+		unique_ptr<LoadTableCachePublication> prefetched_publication;
+		if (transaction.table_prefetch->TryTakeResult(table.GetTableKey(), prefetched, prefetched_publication)) {
+			return ApplyLoadResult(context, table, std::move(prefetched), *prefetched_publication);
+		}
+	}
 	auto publication = ic_catalog.table_request_cache.BeginLoad(table.GetTableKey());
 	return ApplyLoadResult(context, table, IRCAPI::GetTable(context, ic_catalog, schema, table.name), *publication);
 }
@@ -507,6 +516,7 @@ optional_ptr<CatalogEntry> IcebergTableSet::GetEntry(ClientContext &context, con
 	    EntryMissingFromListing(IRCAPI::GetTables(context, ic_catalog, schema), table_name)) {
 		return nullptr;
 	}
+	IcebergTablePrefetch::PrefetchQueryTables(context, iceberg_transaction, schema);
 	auto new_version = IcebergTable::CreatePlaceholder(ic_catalog, schema, table_name);
 	auto &table_info = *new_version;
 	if (!FillEntry(context, table_info)) {
