@@ -1,5 +1,4 @@
 #include "iceberg_attach.hpp"
-#include "catalog/rest/iceberg_table_prefetch.hpp"
 #include "catalog/rest/iceberg_catalog.hpp"
 
 #include "catalog/rest/storage/iceberg_authorization.hpp"
@@ -346,7 +345,6 @@ static bool AuthorizationChanged(const unordered_map<string, Value> &before,
 unique_ptr<Catalog> IcebergAttach::Attach(optional_ptr<StorageExtensionInfo> storage_info, ClientContext &context,
                                           AttachedDatabase &db, const string &name, AttachInfo &info,
                                           AttachOptions &options) {
-	IcebergTablePrefetch::RegisterQueryState(context);
 	IcebergAttachOptions attach_options;
 	attach_options.warehouse = info.path;
 	attach_options.name = name;

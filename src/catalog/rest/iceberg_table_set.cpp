@@ -516,7 +516,6 @@ optional_ptr<CatalogEntry> IcebergTableSet::GetEntry(ClientContext &context, con
 	    EntryMissingFromListing(IRCAPI::GetTables(context, ic_catalog, schema), table_name)) {
 		return nullptr;
 	}
-	IcebergTablePrefetch::PrefetchQueryTables(context, iceberg_transaction, schema);
 	auto new_version = IcebergTable::CreatePlaceholder(ic_catalog, schema, table_name);
 	auto &table_info = *new_version;
 	if (!FillEntry(context, table_info)) {
