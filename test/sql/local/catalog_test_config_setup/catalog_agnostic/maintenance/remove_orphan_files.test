@@ -1,0 +1,141 @@
+# name: test/sql/local/catalog_test_config_setup/catalog_agnostic/maintenance/remove_orphan_files.test
+# description: iceberg_remove_orphan_files deletes the files under the table location that no snapshot or metadata file references
+# group: [maintenance]
+
+require-env CATALOG_TEST_CONFIG_SETUP
+
+require-env TIMETRAVEL_SUPPORT
+
+include test/sql/init_requires
+
+statement ok
+drop table if exists my_datalake.default.orphans;
+
+statement ok
+create table my_datalake.default.orphans (id INTEGER);
+
+statement ok
+insert into my_datalake.default.orphans values (1);
+
+statement ok
+set variable first_snapshot = (
+	select snapshot_id from iceberg_snapshots('my_datalake.default.orphans') order by sequence_number limit 1
+);
+
+statement ok
+insert into my_datalake.default.orphans values (2);
+
+statement ok
+delete from my_datalake.default.orphans where id = 1;
+
+statement ok
+set variable location = (
+	select metadata.location from iceberg_load_table_response(my_datalake.default.orphans)
+);
+
+statement ok
+set variable orphan = getvariable('location') || '/data/orphan-' || uuid()::VARCHAR || '.parquet';
+
+# a file a failed write could have left behind
+statement ok
+copy (select 42 as id) to (getvariable('orphan')) (format parquet);
+
+# another table under this table's location: its files are not this table's orphans
+statement ok
+set variable nested = getvariable('location') || '/nested-' || uuid()::VARCHAR;
+
+# written as directories, which COPY creates one level at a time on local storage as well
+statement ok
+copy (select 1 as id) to (getvariable('nested')) (format parquet, per_thread_output true);
+
+statement ok
+copy (select 1 as id) to (getvariable('nested') || '/data') (format parquet, per_thread_output true);
+
+statement ok
+copy (select 1 as id) to (getvariable('nested') || '/metadata') (format csv, per_thread_output true, filename_pattern '00000-x', file_extension 'metadata.json');
+
+query I
+select count(*) from iceberg_remove_orphan_files('my_datalake.default.orphans', older_than := TIMESTAMP '9999-01-01', dry_run := true)
+where starts_with(orphan_file_location, getvariable('nested'));
+----
+0
+
+# files newer than older_than, by default three days ago, are kept: they may belong to a write in progress
+query I
+select count(*) from iceberg_remove_orphan_files('my_datalake.default.orphans', dry_run := true)
+where orphan_file_location = getvariable('orphan');
+----
+0
+
+query I
+select count(*) from iceberg_remove_orphan_files('my_datalake.default.orphans', older_than := TIMESTAMP '9999-01-01', dry_run := true)
+where orphan_file_location = getvariable('orphan');
+----
+1
+
+# dry_run deletes nothing. A glob without wildcards does not check that the file exists, so list the directory
+query I
+select count(*) from glob(getvariable('location') || '/data/*') where file = getvariable('orphan');
+----
+1
+
+statement ok
+select * from iceberg_remove_orphan_files('my_datalake.default.orphans', older_than := TIMESTAMP '9999-01-01');
+
+query I
+select count(*) from glob(getvariable('location') || '/data/*') where file = getvariable('orphan');
+----
+0
+
+# nothing the table references was deleted: every snapshot still reads, and nothing is left to remove
+query I
+select sum(id) from my_datalake.default.orphans;
+----
+2
+
+query I
+select sum(id) from my_datalake.default.orphans AT (VERSION => getvariable('first_snapshot'));
+----
+1
+
+query I
+select count(*) from iceberg_remove_orphan_files('my_datalake.default.orphans', older_than := TIMESTAMP '9999-01-01', dry_run := true);
+----
+0
+
+# earlier table metadata files are kept, even unreferenced ones
+query I
+select count(*) > 1 from glob(getvariable('location') || '/metadata/*.metadata.json');
+----
+true
+
+statement ok
+insert into my_datalake.default.orphans values (3);
+
+query I
+select sum(id) from my_datalake.default.orphans;
+----
+5
+
+# files an uncommitted write already wrote are not referenced by the committed table yet
+statement ok
+begin;
+
+statement ok
+insert into my_datalake.default.orphans values (4);
+
+statement error
+select * from iceberg_remove_orphan_files('my_datalake.default.orphans', older_than := TIMESTAMP '9999-01-01');
+----
+<REGEX>:.*uncommitted changes.*
+
+statement ok
+rollback;
+
+statement error
+select * from iceberg_remove_orphan_files('default.orphans');
+----
+<REGEX>:.*table identifier must be 'catalog.schema.table'.*
+
+statement ok
+drop table if exists my_datalake.default.orphans;
