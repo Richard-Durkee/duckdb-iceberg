@@ -118,6 +118,8 @@ private:
 	void RefreshRetryTables(IcebergTransactionAlterUpdate &alter_update, const unordered_set<string> &table_keys,
 	                        ClientContext &context);
 	void CleanupFiles();
+	//! Best effort: deletes the files the committed tables no longer reference
+	void DeleteFilesAfterCommit();
 	//! Evict the touched tables' cached LoadTableResult so a retry after a failed commit (e.g. a 409
 	//! conflict) doesn't keep reusing the same stale metadata.
 	void EvictCachedTables();

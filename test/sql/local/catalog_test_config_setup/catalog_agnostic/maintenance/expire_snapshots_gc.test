@@ -1,0 +1,45 @@
+# name: test/sql/local/catalog_test_config_setup/catalog_agnostic/maintenance/expire_snapshots_gc.test
+# description: iceberg_expire_snapshots doesn't delete the files of a table with gc.enabled set to false
+# group: [maintenance]
+
+require-env CATALOG_TEST_CONFIG_SETUP
+
+require-env TIMETRAVEL_SUPPORT
+
+include test/sql/init_requires
+
+statement ok
+drop table if exists my_datalake.default.expire_snapshots_gc;
+
+statement ok
+create table my_datalake.default.expire_snapshots_gc (id INTEGER);
+
+statement ok
+insert into my_datalake.default.expire_snapshots_gc values (1);
+
+statement ok
+insert into my_datalake.default.expire_snapshots_gc values (2);
+
+statement ok
+insert into my_datalake.default.expire_snapshots_gc values (3);
+
+statement ok
+call set_iceberg_table_properties('my_datalake.default.expire_snapshots_gc', {'gc.enabled': 'false'});
+
+statement error
+call iceberg_expire_snapshots('my_datalake.default.expire_snapshots_gc', older_than := TIMESTAMP '9999-01-01', retain_last := 1, delete_files := true);
+----
+<REGEX>:.*gc.enabled.*
+
+query I
+select expired_snapshots_count from iceberg_expire_snapshots('my_datalake.default.expire_snapshots_gc', older_than := TIMESTAMP '9999-01-01', retain_last := 1, delete_files := false);
+----
+2
+
+query I
+select sum(id) from my_datalake.default.expire_snapshots_gc;
+----
+6
+
+statement ok
+drop table if exists my_datalake.default.expire_snapshots_gc;

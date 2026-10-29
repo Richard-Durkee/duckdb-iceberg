@@ -10,12 +10,14 @@
 #include "duckdb/parser/qualified_name.hpp"
 
 #include "catalog/rest/catalog_entry/table/iceberg_table.hpp"
+#include "catalog/rest/iceberg_catalog.hpp"
 #include "catalog/rest/catalog_entry/table/iceberg_table_schema_version.hpp"
 #include "catalog/rest/transaction/iceberg_transaction.hpp"
 #include "catalog/rest/transaction/iceberg_transaction_data.hpp"
 #include "common/iceberg_utils.hpp"
 #include "core/metadata/iceberg_table_metadata.hpp"
 #include "function/iceberg_functions.hpp"
+#include "maintenance/snapshot_files.hpp"
 
 namespace duckdb {
 
@@ -26,14 +28,27 @@ constexpr int64_t DEFAULT_MAX_SNAPSHOT_AGE_MS = 5LL * 24 * 60 * 60 * 1000;
 //! The table properties that set the defaults for older_than and retain_last
 constexpr const char *MAX_SNAPSHOT_AGE_PROPERTY = "history.expire.max-snapshot-age-ms";
 constexpr const char *MIN_SNAPSHOTS_TO_KEEP_PROPERTY = "history.expire.min-snapshots-to-keep";
+//! Set to false on tables whose files other tables may use, for example the ones Spark's 'snapshot' procedure creates
+constexpr const char *GC_ENABLED_PROPERTY = "gc.enabled";
 
 struct IcebergExpireSnapshotsBindData : public TableFunctionData {
 	optional_ptr<IcebergTableSchemaVersion> iceberg_table;
 	optional<int64_t> older_than_ms;
 	optional<int64_t> retain_last;
 	optional<vector<int64_t>> snapshot_ids;
-	//! Report what would be expired without changing the table
+	//! Delete the files only the expired snapshots use, once the commit has landed
+	bool delete_files = false;
+	//! Report what would be expired and deleted without changing the table
 	bool dry_run = false;
+};
+
+//! The files only the expired snapshots use, by kind, in Spark's result order
+struct UnreferencedFiles {
+	vector<string> data_files;
+	vector<string> position_delete_files;
+	vector<string> equality_delete_files;
+	vector<string> manifests;
+	vector<string> manifest_lists;
 };
 
 struct IcebergExpireSnapshotsGlobalState : public GlobalTableFunctionState {
@@ -122,6 +137,7 @@ unique_ptr<FunctionData> IcebergExpireSnapshotsBind(ClientContext &context, Tabl
 	}
 	ret->iceberg_table = table_entry->Cast<IcebergTableSchemaVersion>();
 
+	ret->delete_files = ret->iceberg_table->catalog.Cast<IcebergCatalog>().attach_options.remove_files_on_delete;
 	for (auto &kv : input.named_parameters) {
 		auto option = StringUtil::Lower(kv.first.GetIdentifierName());
 		auto &value = kv.second;
@@ -136,6 +152,8 @@ unique_ptr<FunctionData> IcebergExpireSnapshotsBind(ClientContext &context, Tabl
 				throw InvalidInputException("iceberg_expire_snapshots: retain_last must be at least 1, got %lld",
 				                            *ret->retain_last);
 			}
+		} else if (option == "delete_files") {
+			ret->delete_files = BooleanValue::Get(value);
 		} else if (option == "dry_run") {
 			ret->dry_run = BooleanValue::Get(value);
 		} else if (option == "snapshot_ids") {
@@ -155,8 +173,13 @@ unique_ptr<FunctionData> IcebergExpireSnapshotsBind(ClientContext &context, Tabl
 		input.binder->GetStatementProperties().RegisterDBModify(table_entry->ParentCatalog(), context, modification);
 	}
 
-	names.emplace_back("expired_snapshots_count");
-	return_types.push_back(LogicalType::BIGINT);
+	// Spark's result columns, without the statistics files it also counts, and the number of snapshots expired
+	for (auto &name :
+	     {"deleted_data_files_count", "deleted_position_delete_files_count", "deleted_equality_delete_files_count",
+	      "deleted_manifest_files_count", "deleted_manifest_lists_count", "expired_snapshots_count"}) {
+		names.emplace_back(name);
+		return_types.push_back(LogicalType::BIGINT);
+	}
 	return std::move(ret);
 }
 
@@ -223,6 +246,45 @@ vector<int64_t> SelectExpiredSnapshots(const IcebergExpireSnapshotsBindData &bin
 	return vector<int64_t>(expired.begin(), expired.end());
 }
 
+//! A file is unreferenced when an expired snapshot lists it and no retained snapshot uses it. A retained snapshot only
+//! uses the data and delete files live in it, so a file an expired snapshot removed goes once nothing else needs it.
+UnreferencedFiles FindUnreferencedFiles(ClientContext &context, const IcebergTableMetadata &metadata,
+                                        const unordered_set<int64_t> &expired) {
+	auto kept = CollectSnapshotFiles(
+	    context, metadata, [&](const IcebergSnapshot &snapshot) { return !expired.count(snapshot.snapshot_id); });
+	auto removed = CollectSnapshotFiles(
+	    context, metadata, [&](const IcebergSnapshot &snapshot) { return expired.count(snapshot.snapshot_id) > 0; });
+
+	UnreferencedFiles result;
+	for (auto &path : removed.manifest_lists) {
+		if (!kept.manifest_lists.count(path)) {
+			result.manifest_lists.push_back(path);
+		}
+	}
+	for (auto &path : removed.manifests) {
+		if (!kept.manifests.count(path)) {
+			result.manifests.push_back(path);
+		}
+	}
+	for (auto &entry : removed.listed_files) {
+		if (kept.live_files.count(entry.first)) {
+			continue;
+		}
+		switch (entry.second) {
+		case IcebergManifestEntryContentType::DATA:
+			result.data_files.push_back(entry.first);
+			break;
+		case IcebergManifestEntryContentType::POSITION_DELETES:
+			result.position_delete_files.push_back(entry.first);
+			break;
+		case IcebergManifestEntryContentType::EQUALITY_DELETES:
+			result.equality_delete_files.push_back(entry.first);
+			break;
+		}
+	}
+	return result;
+}
+
 void IcebergExpireSnapshotsFunction(ClientContext &context, TableFunctionInput &data, DataChunk &output) {
 	auto &bind_data = data.bind_data->Cast<IcebergExpireSnapshotsBindData>();
 	auto &global_state = data.global_state->Cast<IcebergExpireSnapshotsGlobalState>();
@@ -241,13 +303,38 @@ void IcebergExpireSnapshotsFunction(ClientContext &context, TableFunctionInput &
 	}
 	auto &metadata = bind_data.iceberg_table->table_info.table_metadata;
 	auto expired_snapshot_ids = SelectExpiredSnapshots(bind_data, metadata);
+	if (bind_data.delete_files && StringUtil::Lower(metadata.GetTableProperty(GC_ENABLED_PROPERTY)) == "false") {
+		throw InvalidInputException("iceberg_expire_snapshots: the table sets 'gc.enabled' to false, so other tables "
+		                            "may use its files; pass delete_files := false to only expire the snapshots");
+	}
+
+	UnreferencedFiles unreferenced;
+	// a dry run reports the files whether or not they would be deleted
+	if (!expired_snapshot_ids.empty() && (bind_data.delete_files || bind_data.dry_run)) {
+		bind_data.iceberg_table->PrepareIcebergScanFromEntry(context);
+		unordered_set<int64_t> expired(expired_snapshot_ids.begin(), expired_snapshot_ids.end());
+		unreferenced = FindUnreferencedFiles(context, metadata, expired);
+	}
 	if (!expired_snapshot_ids.empty() && !bind_data.dry_run) {
+		vector<string> files;
+		if (bind_data.delete_files) {
+			for (auto *kind :
+			     {&unreferenced.data_files, &unreferenced.position_delete_files, &unreferenced.equality_delete_files,
+			      &unreferenced.manifests, &unreferenced.manifest_lists}) {
+				files.insert(files.end(), kind->begin(), kind->end());
+			}
+		}
 		ApplyTableUpdate(bind_data.iceberg_table->table_info, iceberg_transaction, [&](IcebergTable &table) {
 			auto &transaction_data = table.GetOrCreateTransactionData(iceberg_transaction);
-			transaction_data.TableRemoveSnapshots(expired_snapshot_ids);
+			transaction_data.TableRemoveSnapshots(expired_snapshot_ids, std::move(files));
 		});
 	}
-	FlatVector::GetDataMutable<int64_t>(output.data[0])[0] = NumericCast<int64_t>(expired_snapshot_ids.size());
+	idx_t col = 0;
+	for (auto count : {unreferenced.data_files.size(), unreferenced.position_delete_files.size(),
+	                   unreferenced.equality_delete_files.size(), unreferenced.manifests.size(),
+	                   unreferenced.manifest_lists.size(), expired_snapshot_ids.size()}) {
+		FlatVector::GetDataMutable<int64_t>(output.data[col++])[0] = NumericCast<int64_t>(count);
+	}
 	output.SetChildCardinality(1);
 }
 
@@ -262,6 +349,7 @@ TableFunctionSet IcebergFunctions::GetIcebergExpireSnapshotsFunction() {
 		options.Add("older_than", LogicalType::TIMESTAMP_TZ)
 		    .Add("retain_last", LogicalType::BIGINT)
 		    .Add("snapshot_ids", LogicalType::LIST(LogicalType::BIGINT))
+		    .Add("delete_files", LogicalType::BOOLEAN)
 		    .Add("dry_run", LogicalType::BOOLEAN);
 	});
 	function_set.AddFunction(function);
