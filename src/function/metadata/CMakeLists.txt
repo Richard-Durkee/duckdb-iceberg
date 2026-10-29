@@ -10,6 +10,7 @@ add_library(
   iceberg_refs.cpp
   iceberg_rewrite_data_files.cpp
   iceberg_rollback_to_snapshot.cpp
+  iceberg_expire_snapshots.cpp
   iceberg_schema_properties_functions.cpp
   iceberg_snapshots.cpp
   iceberg_manifests.cpp

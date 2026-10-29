@@ -1,0 +1,65 @@
+# name: test/sql/local/catalog_test_config_setup/catalog_agnostic/maintenance/expire_snapshots_gc.test
+# description: iceberg_expire_snapshots doesn't delete the files of a table with gc.enabled set to false
+# group: [maintenance]
+
+require-env CATALOG_TEST_CONFIG_SETUP
+
+require-env TIMETRAVEL_SUPPORT
+
+require-env FILE_CLEANUP_SUPPORT
+
+include test/sql/init_requires
+
+statement ok
+drop table if exists my_datalake.default.expire_snapshots_gc;
+
+statement ok
+create table my_datalake.default.expire_snapshots_gc (id INTEGER);
+
+statement ok
+insert into my_datalake.default.expire_snapshots_gc values (1);
+
+statement ok
+insert into my_datalake.default.expire_snapshots_gc values (2);
+
+statement ok
+insert into my_datalake.default.expire_snapshots_gc values (3);
+
+statement ok
+set variable location = (select metadata.location from iceberg_load_table_response(my_datalake.default.expire_snapshots_gc));
+
+statement ok
+set variable data_files = (select count(*) from glob(getvariable('location') || '/data/**/*.parquet'));
+
+statement ok
+call set_iceberg_table_properties('my_datalake.default.expire_snapshots_gc', {'gc.enabled': 'false'});
+
+# deleting files is the default on this catalog, so a plain call is refused too
+statement error
+call iceberg_expire_snapshots('my_datalake.default.expire_snapshots_gc', older_than := TIMESTAMP '9999-01-01', retain_last := 1);
+----
+<REGEX>:.*gc.enabled.*
+
+statement error
+call iceberg_expire_snapshots('my_datalake.default.expire_snapshots_gc', older_than := TIMESTAMP '9999-01-01', retain_last := 1, delete_files := true);
+----
+<REGEX>:.*gc.enabled.*
+
+query I
+select expired_snapshots_count from iceberg_expire_snapshots('my_datalake.default.expire_snapshots_gc', older_than := TIMESTAMP '9999-01-01', retain_last := 1, delete_files := false);
+----
+2
+
+query I
+select sum(id) from my_datalake.default.expire_snapshots_gc;
+----
+6
+
+# the expired snapshots' files are all still there
+query I
+select count(*) = getvariable('data_files') from glob(getvariable('location') || '/data/**/*.parquet');
+----
+true
+
+statement ok
+drop table if exists my_datalake.default.expire_snapshots_gc;

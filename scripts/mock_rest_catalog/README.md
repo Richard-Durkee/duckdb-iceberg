@@ -74,9 +74,10 @@ creation, create-time metadata updates, append/delete/overwrite/replace snapshot
 optimistic requirements, table loading/listing, renaming (including across
 namespaces), and unregistering tables. Renames preserve the UUID, storage location,
 and metadata file. Namespace property changes preserve unrelated keys and report
-missing removals. Committed snapshots are retained and exposed through the
-snapshot-history capability. Metadata files are immutable and completed before
-publication. Unregistering leaves storage files intact.
+missing removals. Committed snapshots are retained until a `remove-snapshots` update
+removes them, and are exposed through the snapshot-history capability. Metadata files
+are immutable and completed before publication. Unregistering leaves storage files
+intact.
 
 Every published metadata version links its predecessor in `metadata-log`, including
 metadata-only changes. Old files retain their original update timestamps and

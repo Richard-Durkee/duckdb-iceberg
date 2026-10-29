@@ -434,4 +434,23 @@ void IcebergTransactionData::TableRollbackToSnapshot(int64_t snapshot_id) {
 	// schema evolution stays forward-only. See https://github.com/apache/iceberg/issues/5591
 }
 
+void IcebergTransactionData::TableRemoveSnapshots(vector<int64_t> snapshot_ids, vector<string> unreferenced_files) {
+	// the snapshots to expire were chosen against these refs: a ref moved by a concurrent commit could point at one
+	auto &metadata = table_info.table_metadata;
+	bool asserted_main = false;
+	if (metadata.refs) {
+		for (auto &ref : metadata.refs->additional_properties) {
+			requirements.push_back(make_uniq<AssertRefSnapshotId>(ref.second.snapshot_id, ref.first));
+			asserted_main |= ref.first == "main";
+		}
+	}
+	auto current = metadata.GetLatestSnapshot();
+	if (current && !asserted_main) {
+		requirements.push_back(make_uniq<AssertRefSnapshotId>(current->snapshot_id));
+	}
+	updates.push_back(make_uniq<RemoveSnapshots>(std::move(snapshot_ids)));
+	files_to_delete_after_commit.insert(files_to_delete_after_commit.end(), unreferenced_files.begin(),
+	                                    unreferenced_files.end());
+}
+
 } // namespace duckdb

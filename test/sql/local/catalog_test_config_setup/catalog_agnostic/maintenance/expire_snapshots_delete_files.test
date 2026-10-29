@@ -1,0 +1,46 @@
+# name: test/sql/local/catalog_test_config_setup/catalog_agnostic/maintenance/expire_snapshots_delete_files.test
+# description: iceberg_expire_snapshots keeps a delete file the current snapshot still uses
+# group: [maintenance]
+
+require-env CATALOG_TEST_CONFIG_SETUP
+
+require-env TIMETRAVEL_SUPPORT
+
+require-env FILE_CLEANUP_SUPPORT
+
+include test/sql/init_requires
+
+statement ok
+drop table if exists my_datalake.default.expire_delete_files;
+
+statement ok
+create table my_datalake.default.expire_delete_files (id INTEGER);
+
+statement ok
+call set_iceberg_table_properties('my_datalake.default.expire_delete_files', {'write.delete.mode': 'merge-on-read'});
+
+statement ok
+insert into my_datalake.default.expire_delete_files values (1), (2), (3);
+
+# writes a delete file next to the data file
+statement ok
+delete from my_datalake.default.expire_delete_files where id = 2;
+
+# rewrites the data file; the delete file stays in the current snapshot
+statement ok
+call iceberg_rewrite_data_files('my_datalake.default.expire_delete_files', rewrite_all := true);
+
+query III
+select deleted_data_files_count, deleted_position_delete_files_count, expired_snapshots_count
+from iceberg_expire_snapshots('my_datalake.default.expire_delete_files', older_than := TIMESTAMP '9999-01-01', retain_last := 1, delete_files := true);
+----
+1	0	2
+
+# the delete file is still there and still applied
+query I
+select sum(id) from my_datalake.default.expire_delete_files;
+----
+4
+
+statement ok
+drop table if exists my_datalake.default.expire_delete_files;

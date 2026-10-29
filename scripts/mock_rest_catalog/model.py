@@ -446,5 +446,17 @@ class Catalog:
                     timestamp = next(s["timestamp-ms"] for s in metadata["snapshots"] if s["snapshot-id"] == identifier)
                 metadata["snapshot-log"].append({"snapshot-id": identifier, "timestamp-ms": timestamp})
                 metadata["current-snapshot-id"] = identifier
+        elif action == "remove-snapshots":
+            removed = set(update["snapshot-ids"])
+            known = {s["snapshot-id"] for s in metadata["snapshots"]}
+            if not removed <= known:
+                invalid("Unknown snapshot in remove-snapshots")
+            referenced = {ref["snapshot-id"] for ref in metadata["refs"].values()}
+            if metadata.get("current-snapshot-id") is not None:
+                referenced.add(metadata["current-snapshot-id"])
+            if removed & referenced:
+                invalid("Cannot remove a snapshot that a ref points to")
+            metadata["snapshots"] = [s for s in metadata["snapshots"] if s["snapshot-id"] not in removed]
+            metadata["snapshot-log"] = [e for e in metadata["snapshot-log"] if e["snapshot-id"] not in removed]
         else:
             invalid(f"Unknown update action: {action}")

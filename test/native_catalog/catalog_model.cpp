@@ -590,6 +590,30 @@ void Catalog::Apply(Json &metadata, const Json &update, map<string, int64_t> &la
 			metadata.At("snapshot-log").Push(Json::Object({{"snapshot-id", identifier}, {"timestamp-ms", timestamp}}));
 			metadata["current-snapshot-id"] = identifier;
 		}
+	} else if (action == "remove-snapshots") {
+		set<int64_t> removed;
+		for (auto &identifier : update.At("snapshot-ids").Items()) {
+			FindID(metadata.At("snapshots"), "snapshot-id", identifier.Integer());
+			removed.insert(identifier.Integer());
+		}
+		for (auto &ref : metadata.At("refs").Members()) {
+			if (removed.count(ref.second.At("snapshot-id").Integer())) {
+				Invalid("Cannot remove a snapshot that a ref points to");
+			}
+		}
+		if (!metadata.Get("current-snapshot-id").IsNull() &&
+		    removed.count(metadata.At("current-snapshot-id").Integer())) {
+			Invalid("Cannot remove a snapshot that a ref points to");
+		}
+		for (auto collection : {"snapshots", "snapshot-log"}) {
+			auto kept = Json::Array();
+			for (auto &entry : metadata.At(collection).Items()) {
+				if (!removed.count(entry.At("snapshot-id").Integer())) {
+					kept.Push(entry);
+				}
+			}
+			metadata[collection] = std::move(kept);
+		}
 	} else {
 		Invalid("Unknown update action: " + action);
 	}

@@ -60,10 +60,11 @@ struct AssertCurrentSchemaIdRequirement : public IcebergTableRequirement {
 struct AssertRefSnapshotId : public IcebergTableRequirement {
 	static constexpr const IcebergTableRequirementType TYPE = IcebergTableRequirementType::ASSERT_REF_SNAPSHOT_ID;
 
-	explicit AssertRefSnapshotId(int64_t snapshot_id);
+	explicit AssertRefSnapshotId(int64_t snapshot_id, string ref = "main");
 	void CreateRequirement(DatabaseInstance &db, ClientContext &context, IcebergCommitState &commit_state);
 
 	int64_t snapshot_id;
+	string ref;
 };
 
 //! The table's last assigned column id (a.k.a last_column_id) must match the requirement's `last-assigned-field-id`
@@ -194,6 +195,15 @@ struct SetSnapshotRef : public IcebergTableUpdate {
 
 	int64_t snapshot_id;
 	string ref_name;
+};
+
+struct RemoveSnapshots : public IcebergTableUpdate {
+	static constexpr const IcebergTableUpdateType TYPE = IcebergTableUpdateType::REMOVE_SNAPSHOTS;
+
+	explicit RemoveSnapshots(vector<int64_t> snapshot_ids);
+	void CreateUpdate(DatabaseInstance &db, ClientContext &context, IcebergCommitState &commit_state) const override;
+
+	vector<int64_t> snapshot_ids;
 };
 
 } // namespace duckdb

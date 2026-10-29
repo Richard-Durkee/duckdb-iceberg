@@ -1,0 +1,133 @@
+# name: test/sql/local/catalog_test_config_setup/catalog_agnostic/maintenance/expire_snapshots_files.test
+# description: iceberg_expire_snapshots deletes the files only the expired snapshots reference, after the commit
+# group: [maintenance]
+
+require-env CATALOG_TEST_CONFIG_SETUP
+
+require-env TIMETRAVEL_SUPPORT
+
+require-env FILE_CLEANUP_SUPPORT
+
+include test/sql/init_requires
+
+statement ok
+drop table if exists my_datalake.default.expire_files;
+
+statement ok
+create table my_datalake.default.expire_files (id INTEGER);
+
+statement ok
+set variable location = (
+	select metadata.location from iceberg_load_table_response(my_datalake.default.expire_files)
+);
+
+# a location reused across runs may hold files a DROP TABLE left: count relative to what is there now
+statement ok
+set variable data_before = (select count(*) from glob(getvariable('location') || '/data/**/*.parquet'));
+
+statement ok
+set variable lists_before = (select count(*) from glob(getvariable('location') || '/metadata/snap-*.avro'));
+
+statement ok
+insert into my_datalake.default.expire_files values (1);
+
+statement ok
+insert into my_datalake.default.expire_files values (2);
+
+statement ok
+insert into my_datalake.default.expire_files values (3);
+
+# the three data files are rewritten into one: the current snapshot no longer references them
+statement ok
+call iceberg_rewrite_data_files('my_datalake.default.expire_files', rewrite_all := true);
+
+query I
+select count(*) - getvariable('data_before') from glob(getvariable('location') || '/data/**/*.parquet');
+----
+4
+
+query I
+select count(*) - getvariable('lists_before') from glob(getvariable('location') || '/metadata/snap-*.avro');
+----
+4
+
+# dry_run reports what would go and changes nothing
+query IIIII
+select deleted_data_files_count, deleted_position_delete_files_count, deleted_equality_delete_files_count,
+	deleted_manifest_lists_count, expired_snapshots_count
+from iceberg_expire_snapshots('my_datalake.default.expire_files', older_than := TIMESTAMP '9999-01-01', retain_last := 1, dry_run := true, delete_files := true);
+----
+3	0	0	3	3
+
+query I
+select count(*) from iceberg_snapshots(my_datalake.default.expire_files);
+----
+4
+
+query I
+select count(*) - getvariable('data_before') from glob(getvariable('location') || '/data/**/*.parquet');
+----
+4
+
+statement ok
+set variable manifests_before = (select count(*) from glob(getvariable('location') || '/metadata/*-m*.avro'));
+
+statement ok
+set variable expired = (
+	select deleted_manifest_files_count
+	from iceberg_expire_snapshots('my_datalake.default.expire_files', older_than := TIMESTAMP '9999-01-01', retain_last := 1, delete_files := true)
+);
+
+query I
+select count(*) from iceberg_snapshots(my_datalake.default.expire_files);
+----
+1
+
+# only the rewritten file, the current manifest list and the manifests the current snapshot reads are left
+query I
+select count(*) - getvariable('data_before') from glob(getvariable('location') || '/data/**/*.parquet');
+----
+1
+
+query I
+select count(*) - getvariable('lists_before') from glob(getvariable('location') || '/metadata/snap-*.avro');
+----
+1
+
+# the three insert manifests: the current snapshot only reads the rewrite's
+query I
+select getvariable('expired');
+----
+3
+
+query I
+select getvariable('manifests_before') - getvariable('expired') = (select count(*) from glob(getvariable('location') || '/metadata/*-m*.avro'));
+----
+true
+
+query I
+select sum(id) from my_datalake.default.expire_files;
+----
+6
+
+# delete_files := false expires the snapshots and leaves their files
+statement ok
+insert into my_datalake.default.expire_files values (4);
+
+query I
+select deleted_data_files_count + deleted_manifest_lists_count from iceberg_expire_snapshots('my_datalake.default.expire_files', older_than := TIMESTAMP '9999-01-01', retain_last := 1, delete_files := false);
+----
+0
+
+query I
+select count(*) from iceberg_snapshots(my_datalake.default.expire_files);
+----
+1
+
+query I
+select count(*) - getvariable('lists_before') from glob(getvariable('location') || '/metadata/snap-*.avro');
+----
+2
+
+statement ok
+drop table if exists my_datalake.default.expire_files;

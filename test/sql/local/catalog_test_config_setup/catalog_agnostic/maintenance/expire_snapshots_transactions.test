@@ -1,0 +1,118 @@
+# name: test/sql/local/catalog_test_config_setup/catalog_agnostic/maintenance/expire_snapshots_transactions.test
+# description: iceberg_expire_snapshots commits with the transaction and refuses one that has other changes
+# group: [maintenance]
+
+require-env CATALOG_TEST_CONFIG_SETUP
+
+require-env TIMETRAVEL_SUPPORT
+
+include test/sql/init_requires
+
+statement ok
+drop table if exists my_datalake.default.expire_snapshots_transactions;
+
+statement ok
+create table my_datalake.default.expire_snapshots_transactions (id INTEGER);
+
+statement ok
+insert into my_datalake.default.expire_snapshots_transactions values (1);
+
+statement ok
+insert into my_datalake.default.expire_snapshots_transactions values (2);
+
+statement ok
+insert into my_datalake.default.expire_snapshots_transactions values (3);
+
+# a rolled back transaction expires nothing
+statement ok
+begin;
+
+statement ok
+call iceberg_expire_snapshots('my_datalake.default.expire_snapshots_transactions', older_than := TIMESTAMP '9999-01-01', retain_last := 1);
+
+statement ok
+rollback;
+
+query I
+select count(*) from iceberg_snapshots('my_datalake.default.expire_snapshots_transactions');
+----
+3
+
+# snapshots are chosen against the committed table, so changes queued earlier are refused: a rollback could otherwise
+# move main to a snapshot this expires
+statement ok
+begin;
+
+statement ok
+call iceberg_expire_snapshots('my_datalake.default.expire_snapshots_transactions', older_than := TIMESTAMP '9999-01-01', retain_last := 1);
+
+statement error
+call iceberg_expire_snapshots('my_datalake.default.expire_snapshots_transactions', older_than := TIMESTAMP '9999-01-01', retain_last := 1);
+----
+<REGEX>:.*uncommitted changes.*
+
+statement ok
+rollback;
+
+statement ok
+begin;
+
+statement ok
+insert into my_datalake.default.expire_snapshots_transactions values (4);
+
+statement error
+call iceberg_expire_snapshots('my_datalake.default.expire_snapshots_transactions', older_than := TIMESTAMP '9999-01-01', retain_last := 1);
+----
+<REGEX>:.*uncommitted changes.*
+
+statement ok
+rollback;
+
+# a dry run changes nothing, so it is allowed
+statement ok
+begin;
+
+statement ok
+insert into my_datalake.default.expire_snapshots_transactions values (4);
+
+query I
+select expired_snapshots_count from iceberg_expire_snapshots('my_datalake.default.expire_snapshots_transactions', older_than := TIMESTAMP '9999-01-01', retain_last := 1, dry_run := true);
+----
+2
+
+# nothing was expired: a real run would leave one snapshot
+query I
+select count(*) from iceberg_snapshots('my_datalake.default.expire_snapshots_transactions');
+----
+3
+
+statement ok
+rollback;
+
+query I
+select count(*) from iceberg_snapshots('my_datalake.default.expire_snapshots_transactions');
+----
+3
+
+# an expire in an explicit transaction takes effect at commit
+statement ok
+begin;
+
+statement ok
+call iceberg_expire_snapshots('my_datalake.default.expire_snapshots_transactions', older_than := TIMESTAMP '9999-01-01', retain_last := 1);
+
+statement ok
+commit;
+
+query I
+select count(*) from iceberg_snapshots('my_datalake.default.expire_snapshots_transactions');
+----
+1
+
+query I
+select sum(id) from my_datalake.default.expire_snapshots_transactions;
+----
+6
+
+statement ok
+drop table if exists my_datalake.default.expire_snapshots_transactions;

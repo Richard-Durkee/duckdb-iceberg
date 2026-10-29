@@ -93,6 +93,13 @@
 	],
 	"skip_tests": [
 		{
+			"reason": "Lists the table location with glob, which the vended storage credentials don't cover outside a table scan",
+			"paths": [
+				"test/sql/local/catalog_test_config_setup/catalog_agnostic/maintenance/expire_snapshots_files.test",
+				"test/sql/local/catalog_test_config_setup/catalog_agnostic/maintenance/expire_snapshots_gc.test"
+			]
+		},
+		{
 			"reason": "Not yet supported with Lakekeeper",
 			"paths": [
 				"test/sql/local/catalog_test_config_setup/catalog_interop/insert/test_write_upper_and_lower_bounds.test",

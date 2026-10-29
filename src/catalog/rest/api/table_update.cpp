@@ -80,8 +80,9 @@ void AssertCurrentSchemaIdRequirement::CreateRequirement(DatabaseInstance &db, C
 	req.assert_current_schema_id->current_schema_id = current_schema_id;
 }
 
-AssertRefSnapshotId::AssertRefSnapshotId(int64_t snapshot_id)
-    : IcebergTableRequirement(IcebergTableRequirementType::ASSERT_REF_SNAPSHOT_ID), snapshot_id(snapshot_id) {
+AssertRefSnapshotId::AssertRefSnapshotId(int64_t snapshot_id, string ref)
+    : IcebergTableRequirement(IcebergTableRequirementType::ASSERT_REF_SNAPSHOT_ID), snapshot_id(snapshot_id),
+      ref(std::move(ref)) {
 }
 
 void AssertRefSnapshotId::CreateRequirement(DatabaseInstance &db, ClientContext &context,
@@ -90,7 +91,7 @@ void AssertRefSnapshotId::CreateRequirement(DatabaseInstance &db, ClientContext 
 	auto &req = commit_state.table_change.requirements.back();
 	req.assert_ref_snapshot_id = rest_api_objects::AssertRefSnapshotId();
 	req.assert_ref_snapshot_id->type = "assert-ref-snapshot-id";
-	req.assert_ref_snapshot_id->ref = "main";
+	req.assert_ref_snapshot_id->ref = ref;
 	req.assert_ref_snapshot_id->snapshot_id = snapshot_id;
 }
 
@@ -292,6 +293,21 @@ void SetSnapshotRef::CreateUpdate(DatabaseInstance &db, ClientContext &context,
 		}
 	}
 	snapshot_reference.snapshot_id = snapshot_id;
+}
+
+RemoveSnapshots::RemoveSnapshots(vector<int64_t> snapshot_ids_p)
+    : IcebergTableUpdate(IcebergTableUpdateType::REMOVE_SNAPSHOTS), snapshot_ids(std::move(snapshot_ids_p)) {
+}
+
+void RemoveSnapshots::CreateUpdate(DatabaseInstance &db, ClientContext &context,
+                                   IcebergCommitState &commit_state) const {
+	(void)db;
+	(void)context;
+	commit_state.table_change.updates.push_back(rest_api_objects::TableUpdate());
+	auto &req = commit_state.table_change.updates.back();
+	req.remove_snapshots_update = rest_api_objects::RemoveSnapshotsUpdate();
+	req.remove_snapshots_update->base_update.action = "remove-snapshots";
+	req.remove_snapshots_update->snapshot_ids = snapshot_ids;
 }
 
 } // namespace duckdb

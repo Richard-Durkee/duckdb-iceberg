@@ -20,6 +20,8 @@
 
 #include "common/iceberg_constants.hpp"
 #include "planning/metadata_io/manifest/iceberg_manifest_reader.hpp"
+#include "core/metadata/iceberg_table_metadata.hpp"
+#include "maintenance/snapshot_files.hpp"
 #include "catalog/rest/transaction/iceberg_transaction.hpp"
 #include "catalog/rest/api/iceberg_retry.hpp"
 #include "catalog/rest/iceberg_catalog.hpp"
@@ -553,6 +555,7 @@ void IcebergTransaction::Commit() {
 	}
 
 	temp_con.Rollback();
+	DeleteFilesAfterCommit();
 }
 
 void IcebergTransaction::DoTableUpdates(IcebergTransactionAlterUpdate &alter_update, ClientContext &context) {
@@ -925,6 +928,71 @@ void IcebergTransaction::CleanupFiles() {
 				}
 			}
 			RemoveFilesBestEffort(temp_context, fs, data_files, "data_file");
+		}
+	}
+}
+
+//! The files the committed table still uses. A commit that landed next to ours may have added a branch, tag or
+//! snapshot that uses files ours no longer does.
+static unordered_set<string> FilesStillInUse(ClientContext &context, IcebergTable &table) {
+	auto load_result = IRCAPI::GetTable(context, table.catalog, table.schema, table.name);
+	if (load_result.error_ || !load_result.result_) {
+		throw IOException("could not load table '%s' to check which files it still uses", table.name);
+	}
+	auto &load_table_result = *load_result.result_;
+	// prefer the metadata file; some catalogs (e.g. Glue) rebuild the metadata in the response instead.
+	// A commit that lands after this reload is not covered, as in Iceberg's own implementation
+	auto committed = load_table_result.metadata_location
+	                     ? IcebergTableMetadata::FromTableMetadata(IcebergTableMetadata::Parse(
+	                           *load_table_result.metadata_location, FileSystem::GetFileSystem(context), "none"))
+	                     : IcebergTableMetadata::FromTableMetadata(load_table_result.metadata);
+	auto files = CollectSnapshotFiles(context, committed, [](const IcebergSnapshot &) { return true; });
+	unordered_set<string> result = std::move(files.live_files);
+	result.insert(files.manifests.begin(), files.manifests.end());
+	result.insert(files.manifest_lists.begin(), files.manifest_lists.end());
+	return result;
+}
+
+void IcebergTransaction::DeleteFilesAfterCommit() {
+	auto alter_update = GetAlterUpdate();
+	if (!alter_update) {
+		return;
+	}
+	vector<reference<IcebergTable>> tables;
+	for (auto &up_table : alter_update->updated_tables) {
+		auto &table = up_table.second.get();
+		if (table.transaction_data && !table.transaction_data->files_to_delete_after_commit.empty()) {
+			tables.push_back(table);
+		}
+	}
+	if (tables.empty()) {
+		return;
+	}
+	ScopedTransaction temp_con(db);
+	auto &temp_context = temp_con.GetContext();
+	// the user's settings, so that S3 options set without a secret apply to the deletes too
+	if (!context.expired()) {
+		temp_context.config = context.lock()->config;
+	}
+	auto &fs = FileSystem::GetFileSystem(temp_context);
+	for (auto &table_ref : tables) {
+		auto &table = table_ref.get();
+		try {
+			// creates the secret for the table's storage credentials
+			table.GetLatestSchema()->Cast<IcebergTableSchemaVersion>().PrepareIcebergScanFromEntry(temp_context);
+			auto in_use = FilesStillInUse(temp_context, table);
+			vector<string> unused_files;
+			for (auto &file : table.transaction_data->files_to_delete_after_commit) {
+				if (!in_use.count(file)) {
+					unused_files.push_back(file);
+				}
+			}
+			RemoveFilesBestEffort(temp_context, fs, unused_files, "unreferenced file");
+		} catch (std::exception &ex) {
+			// the commit has landed: a file that could not be deleted is only left in storage
+			DUCKDB_LOG(temp_context, IcebergLogType,
+			           "Iceberg Transaction, could not delete the unreferenced files of table '%s': %s", table.name,
+			           ex.what());
 		}
 	}
 }
