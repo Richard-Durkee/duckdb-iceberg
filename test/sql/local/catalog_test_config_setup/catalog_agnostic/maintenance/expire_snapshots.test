@@ -1,0 +1,92 @@
+# name: test/sql/local/catalog_test_config_setup/catalog_agnostic/maintenance/expire_snapshots.test
+# description: iceberg_expire_snapshots removes old snapshots and keeps the current data
+# group: [maintenance]
+
+require-env CATALOG_TEST_CONFIG_SETUP
+
+require-env TIMETRAVEL_SUPPORT
+
+include test/sql/init_requires
+
+statement ok
+drop table if exists my_datalake.default.expire_snapshots;
+
+statement ok
+create table my_datalake.default.expire_snapshots (id INTEGER);
+
+statement ok
+insert into my_datalake.default.expire_snapshots values (1);
+
+statement ok
+insert into my_datalake.default.expire_snapshots values (2);
+
+statement ok
+insert into my_datalake.default.expire_snapshots values (3);
+
+statement ok
+set variable first_snapshot = (select snapshot_id from iceberg_snapshots('my_datalake.default.expire_snapshots') order by sequence_number limit 1);
+
+# by default only snapshots older than five days expire: none here
+query I
+select expired_snapshots_count from iceberg_expire_snapshots('my_datalake.default.expire_snapshots');
+----
+0
+
+query I
+select count(*) from iceberg_snapshots('my_datalake.default.expire_snapshots');
+----
+3
+
+# retain_last keeps the current snapshot; the other two are old enough
+query I
+select expired_snapshots_count from iceberg_expire_snapshots('my_datalake.default.expire_snapshots', older_than := TIMESTAMP '9999-01-01', retain_last := 1);
+----
+2
+
+query I
+select count(*) from iceberg_snapshots('my_datalake.default.expire_snapshots');
+----
+1
+
+query I
+select sum(id) from my_datalake.default.expire_snapshots;
+----
+6
+
+statement error
+select * from my_datalake.default.expire_snapshots AT (VERSION => getvariable('first_snapshot'));
+----
+<REGEX>:.*(does not exist|Could not find|not found).*
+
+# without retain_last, the table's history.expire.min-snapshots-to-keep says how many to keep
+statement ok
+insert into my_datalake.default.expire_snapshots values (4);
+
+statement ok
+insert into my_datalake.default.expire_snapshots values (5);
+
+statement ok
+call set_iceberg_table_properties('my_datalake.default.expire_snapshots', {'history.expire.min-snapshots-to-keep': '2'});
+
+query I
+select expired_snapshots_count from iceberg_expire_snapshots('my_datalake.default.expire_snapshots', older_than := TIMESTAMP '9999-01-01');
+----
+1
+
+query I
+select count(*) from iceberg_snapshots('my_datalake.default.expire_snapshots');
+----
+2
+
+statement error
+select * from iceberg_expire_snapshots('my_datalake.default.expire_snapshots', retain_last := 0);
+----
+<REGEX>:.*retain_last must be at least 1.*
+
+statement error
+select * from iceberg_expire_snapshots('default.expire_snapshots');
+----
+<REGEX>:.*table identifier must be 'catalog.schema.table'.*
+
+statement ok
+drop table if exists my_datalake.default.expire_snapshots;

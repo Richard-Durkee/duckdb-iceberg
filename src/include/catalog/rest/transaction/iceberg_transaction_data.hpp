@@ -61,6 +61,8 @@ public:
 	void TableSetLocation();
 	//! Roll main back to an ancestor snapshot (Spark rollback_to_snapshot semantics).
 	void TableRollbackToSnapshot(int64_t snapshot_id);
+	//! Expire 'snapshot_ids'
+	void TableRemoveSnapshots(vector<int64_t> snapshot_ids);
 
 private:
 	void CacheExistingManifestList(lock_guard<mutex> &guard, const IcebergTableMetadata &metadata);

@@ -1,0 +1,61 @@
+# name: test/sql/local/catalog_test_config_setup/catalog_agnostic/maintenance/expire_snapshots_ids.test
+# description: iceberg_expire_snapshots expires exactly the snapshots snapshot_ids names
+# group: [maintenance]
+
+require-env CATALOG_TEST_CONFIG_SETUP
+
+require-env TIMETRAVEL_SUPPORT
+
+include test/sql/init_requires
+
+statement ok
+drop table if exists my_datalake.default.expire_snapshots_ids;
+
+statement ok
+create table my_datalake.default.expire_snapshots_ids (id INTEGER);
+
+statement ok
+insert into my_datalake.default.expire_snapshots_ids values (1);
+
+statement ok
+insert into my_datalake.default.expire_snapshots_ids values (2);
+
+statement ok
+insert into my_datalake.default.expire_snapshots_ids values (3);
+
+# ids come straight from iceberg_snapshots, which returns them as UBIGINT
+statement ok
+set variable snapshot_ids = (select list(snapshot_id order by sequence_number) from iceberg_snapshots('my_datalake.default.expire_snapshots_ids'));
+
+query I
+select expired_snapshots_count from iceberg_expire_snapshots('my_datalake.default.expire_snapshots_ids', snapshot_ids := getvariable('snapshot_ids')[1:1]);
+----
+1
+
+query I
+select count(*) from iceberg_snapshots('my_datalake.default.expire_snapshots_ids');
+----
+2
+
+query I
+select sum(id) from my_datalake.default.expire_snapshots_ids;
+----
+6
+
+statement error
+select * from iceberg_expire_snapshots('my_datalake.default.expire_snapshots_ids', snapshot_ids := getvariable('snapshot_ids')[3:3]);
+----
+<REGEX>:.*is the current snapshot or is referenced by a branch or tag.*
+
+statement error
+select * from iceberg_expire_snapshots('my_datalake.default.expire_snapshots_ids', snapshot_ids := [42]);
+----
+<REGEX>:.*snapshot 42 does not exist.*
+
+statement error
+select * from iceberg_expire_snapshots('my_datalake.default.expire_snapshots_ids', snapshot_ids := [NULL]);
+----
+<REGEX>:.*snapshot_ids cannot contain NULL.*
+
+statement ok
+drop table if exists my_datalake.default.expire_snapshots_ids;
