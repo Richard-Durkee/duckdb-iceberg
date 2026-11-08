@@ -147,8 +147,14 @@ void IcebergScanOrder::Apply(ClientContext &context, const IcebergTableSchema &s
 			const auto &frontier = primary(order_entries[k]);
 			idx_t guaranteed = 0;
 			for (idx_t j = 0; j < k; j++) {
-				if (!ScanOrderCompare(opposite(order_entries[j]), frontier, stat_type)) {
-					guaranteed += order_entries[j].count;
+				//! Only rows that sort strictly before the frontier are guaranteed to come first. A row that ties the
+				//! frontier may lose to it on a later ORDER BY key
+				const auto &ahead = order_entries[j];
+				if (ScanOrderCompare(frontier, opposite(ahead), stat_type)) {
+					guaranteed += ahead.count;
+				} else if (ScanOrderCompare(frontier, primary(ahead), stat_type)) {
+					//! The files overlap, but the row at this file's own bound still sorts before the frontier
+					guaranteed += 1;
 				}
 				if (guaranteed >= row_limit) {
 					break;
